@@ -32,18 +32,18 @@ struct StringPublisher: Publisher {
 	final class StringPublisherSubscription<S>: Subscription where
 		S: Subscriber,
 		S.Input == [Character],
-        S.Failure == Error
+		S.Failure == Error
 	{
-        private var subscriber: S?
-        private var data: [Character]
-        private var runningDemand: Subscribers.Demand = .max(0)
-        private var isFinished = false
-        private var isProcessingRequest = false	// make this Atomic to be threadsafe
+		private var subscriber: S?
+		private var data: [Character]
+		private var runningDemand: Subscribers.Demand = .max(0)
+		private var isFinished = false
+		private var isProcessingRequest = false	// make this Atomic to be threadsafe
 
-        init(subscriber: S, data: [Character]) {
-            self.subscriber = subscriber
-            self.data = data
-        }
+		init(subscriber: S, data: [Character]) {
+			self.subscriber = subscriber
+			self.data = data
+		}
 
 		func request(_ demand: Subscribers.Demand) {
 			guard !isFinished else { return }
@@ -51,27 +51,31 @@ struct StringPublisher: Publisher {
 			guard data.count > 0 else { return sendError(.inputStringWasEmpty) }
 
 			runningDemand += demand
-
+//Swift.print("DEMAND:", runningDemand.max ?? -1)
 			if isProcessingRequest == true {
+//Swift.print("ADDED:", demand.max ?? -1)
 				return
 			} else {
 				isProcessingRequest = true
 			}
 
-			while runningDemand > 0 && data.count > 0 && isFinished == false {
+			while runningDemand > 0 && !data.isEmpty {
 				let count = computeSendCount()
 				let tempData: [Character] = Array( data.prefix(upTo: count) )
+				let stillDesired = subscriber.receive(tempData)
+
+				// Only update counts and data AFTER sending receive
 				data.removeSubrange(0..<count)
-
-				let stillWant = subscriber.receive(tempData)
-				if let desired = runningDemand.max, desired == 0 {
-					runningDemand += stillWant
+				runningDemand -= count
+//Swift.print("RUNNING DEMAND:", runningDemand.max ?? -1, "EXPECTED:", stillDesired.max ?? -1, "COUNT:", count)
+				if let runningDesired = runningDemand.max, let stillDesired = stillDesired.max {
+					assert(runningDesired == stillDesired)
 				}
+			}
 
-				if data.isEmpty {
-					subscriber.receive(completion: .finished)
-					isFinished = true
-				}
+			if data.isEmpty {
+				subscriber.receive(completion: .finished)
+				isFinished = true
 			}
 
 			isProcessingRequest = false
@@ -92,22 +96,23 @@ struct StringPublisher: Publisher {
 			return count
 		}
 
-        func cancel() {
+		func cancel() {
 			isFinished = true
-        }
-    }
+		}
+	}
 
 }
 
+print("TEST 1")
 do {
 	var count = 0
 	let _ = StringPublisher(string: "Hello World").sink(
 		receiveCompletion: { completion in
 			switch completion {
 			case .failure(let err):
-				print("\nERROR: ", err)
+				print("ERROR: ", err)
 			case .finished:
-				print("\nFINISHED")
+				print("FINISHED")
 			}
 		}) { (chars: [Character]) in
 			chars.forEach({ print(count == 0 ? "Char:" : " ", $0, terminator: ""); count += 1 })
@@ -115,28 +120,30 @@ do {
 }
 
 final class StringSubscriber: Subscriber {
-    typealias Input = [Character]
-    typealias Failure = Error
+	typealias Input = [Character]
+	typealias Failure = Error
 
-    var subscription: Subscription?
-    var count = 0
+	var subscription: Subscription?
+	var count = 0
 
-    func receive(subscription: Subscription) {
-        self.subscription = subscription
-        self.subscription?.request(.max(1))
-    }
+	func receive(subscription: Subscription) {
+		self.subscription = subscription
+		self.subscription?.request(.max(1))
+	}
 
-    func receive(_ input: Input) -> Subscribers.Demand {
+	func receive(_ input: Input) -> Subscribers.Demand {
 		input.forEach({ print(count == 0 ? "Chars:" : " ", $0, terminator: ""); self.count += 1 })
-        return .max(1)
-    }
+		subscription?.request(.max(1))
+		return .max(1)
+	}
 
-    func receive(completion: Subscribers.Completion<Failure>) {
-        print("\nSubscriber completion \(completion)")
-        self.subscription = nil
-    }
+	func receive(completion: Subscribers.Completion<Failure>) {
+		print("\nSubscriber completion: \(completion)")
+		self.subscription = nil
+	}
 }
 
+print("TEST 2")
 do {
 	let publisher = StringPublisher(string: "Hello World")
 	let subcriber = StringSubscriber()
@@ -205,13 +212,14 @@ struct UpperCasePublisher: Publisher {
 			while runningDemand > 0 && !data.isEmpty {
 				let count = computeSendCount()
 				let tempData: [Character] = Array( data.prefix(upTo: count) )
+				let stillDesired = downstreamSubscriber.receive(tempData)
+
+				// Only update counts and data AFTER sending receive
 				data.removeSubrange(0..<count)
-
-				let stillWant = downstreamSubscriber.receive(tempData)
-				if let desired = runningDemand.max, desired == 0 {
-					runningDemand += stillWant
+				runningDemand -= count
+				if let runningDesired = runningDemand.max, let stillDesired = stillDesired.max {
+					assert(runningDesired == stillDesired)
 				}
-
 			}
 
 			if isUpstreamFinished && data.isEmpty {
@@ -255,7 +263,7 @@ struct UpperCasePublisher: Publisher {
 				s.forEach({ data.append($0) })
 			})
 
-			request(.max(0))
+			upstreamSubscription?.request(.max(1))
 			return .max(1)
 		}
 
@@ -264,7 +272,7 @@ struct UpperCasePublisher: Publisher {
 
 			switch completion {
 			case .finished:
-				request(.max(0))
+				request(.max(0)) // Trigger the publisher side to finished sending then send .finished
 			case .failure(let error):
 				downstreamSubscriber?.receive(completion: .failure(error))
 			}
@@ -274,8 +282,8 @@ struct UpperCasePublisher: Publisher {
 
 }
 
+print("TEST 3: TO UPPER")
 do {
-	print("TO UPPER")
 	let p1 = StringPublisher(string: "Hello World")
 	let p2 = UpperCasePublisher(upstream: p1.eraseToAnyPublisher())
 
@@ -283,8 +291,8 @@ do {
 	p2.subscribe(subscriber)
 }
 
+print("TEST 4: ERROR")
 do {
-	print("ERROR")
 	let p1 = StringPublisher(string: "")
 	let p2 = UpperCasePublisher(upstream: p1.eraseToAnyPublisher())
 
@@ -299,6 +307,7 @@ extension Publisher where Output == [Character], Failure == Error {
 	}
 }
 
+print("TEST 5: Operator 1")
 do {
 	print("Operator 1")
 	let p2 = StringPublisher(string: "Hello World").toUpper()
@@ -306,8 +315,8 @@ do {
 	p2.subscribe(subscriber)
 }
 
+print("TEST 6: Operator 2")
 do {
-	print("Operator 2")
 	var count = 0
 	let _ = StringPublisher(string: "Hello World")
 	.toUpper()
@@ -324,4 +333,3 @@ do {
 		chars.forEach({ print(count == 0 ? "Char:" : " ", $0, terminator: ""); count += 1 })
 	 }
  }
-
